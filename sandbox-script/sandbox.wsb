@@ -1,0 +1,13 @@
+<Configuration>
+  <Networking>Default</Networking>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\Quarantine_Zone</HostFolder>
+      <SandboxFolder>C:\Users\WDAGUtilityAccount\Downloads</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>msedge.exe -inprivate</Command>
+  </LogonCommand>
+</Configuration>
