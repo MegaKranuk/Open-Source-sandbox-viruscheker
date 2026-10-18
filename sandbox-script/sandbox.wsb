@@ -1,13 +1,45 @@
 <Configuration>
-  <Networking>Default</Networking>
+  <VGpu>Disable</VGpu>
+  <Networking>Enable</Networking>
+  <ClipboardRedirection>Disable</ClipboardRedirection>
   <MappedFolders>
     <MappedFolder>
-      <HostFolder>C:\Quarantine_Zone</HostFolder>
-      <SandboxFolder>C:\Users\WDAGUtilityAccount\Downloads</SandboxFolder>
+      <HostFolder>C:\Quarantine_Zone\Staging</HostFolder>
+      <SandboxFolder>C:\Sample</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\Quarantine_Zone\Honeypot\Desktop</HostFolder>
+      <SandboxFolder>C:\Users\WDAGUtilityAccount\Desktop\AnalysisData</SandboxFolder>
       <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\Quarantine_Zone\Honeypot\Documents</HostFolder>
+      <SandboxFolder>C:\Users\WDAGUtilityAccount\Documents\AnalysisData</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\Quarantine_Zone\Honeypot\Pictures</HostFolder>
+      <SandboxFolder>C:\Users\WDAGUtilityAccount\Pictures\AnalysisData</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\Quarantine_Zone\Honeypot\Downloads</HostFolder>
+      <SandboxFolder>C:\Users\WDAGUtilityAccount\Downloads\AnalysisData</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\Quarantine_Zone\Telemetry</HostFolder>
+      <SandboxFolder>C:\Telemetry</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\RBI_FeatureSource</HostFolder>
+      <SandboxFolder>C:\FeatureSource</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
     </MappedFolder>
   </MappedFolders>
   <LogonCommand>
-    <Command>msedge.exe -inprivate</Command>
+    <Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Sample\sandbox-runner.ps1</Command>
   </LogonCommand>
 </Configuration>
