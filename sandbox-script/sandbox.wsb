@@ -1,6 +1,6 @@
 <Configuration>
   <VGpu>Disable</VGpu>
-  <Networking>Enable</Networking>
+  <Networking>Disable</Networking>
   <ClipboardRedirection>Disable</ClipboardRedirection>
   <MappedFolders>
     <MappedFolder>
@@ -9,27 +9,27 @@
       <ReadOnly>true</ReadOnly>
     </MappedFolder>
     <MappedFolder>
-      <HostFolder>C:\Quarantine_Zone\Honeypot\Desktop</HostFolder>
+      <HostFolder>C:\Quarantine_Zone\RBI_WritableVolume\Honeypot\Desktop</HostFolder>
       <SandboxFolder>C:\Users\WDAGUtilityAccount\Desktop\AnalysisData</SandboxFolder>
       <ReadOnly>false</ReadOnly>
     </MappedFolder>
     <MappedFolder>
-      <HostFolder>C:\Quarantine_Zone\Honeypot\Documents</HostFolder>
+      <HostFolder>C:\Quarantine_Zone\RBI_WritableVolume\Honeypot\Documents</HostFolder>
       <SandboxFolder>C:\Users\WDAGUtilityAccount\Documents\AnalysisData</SandboxFolder>
       <ReadOnly>false</ReadOnly>
     </MappedFolder>
     <MappedFolder>
-      <HostFolder>C:\Quarantine_Zone\Honeypot\Pictures</HostFolder>
+      <HostFolder>C:\Quarantine_Zone\RBI_WritableVolume\Honeypot\Pictures</HostFolder>
       <SandboxFolder>C:\Users\WDAGUtilityAccount\Pictures\AnalysisData</SandboxFolder>
       <ReadOnly>false</ReadOnly>
     </MappedFolder>
     <MappedFolder>
-      <HostFolder>C:\Quarantine_Zone\Honeypot\Downloads</HostFolder>
+      <HostFolder>C:\Quarantine_Zone\RBI_WritableVolume\Honeypot\Downloads</HostFolder>
       <SandboxFolder>C:\Users\WDAGUtilityAccount\Downloads\AnalysisData</SandboxFolder>
       <ReadOnly>false</ReadOnly>
     </MappedFolder>
     <MappedFolder>
-      <HostFolder>C:\Quarantine_Zone\Telemetry</HostFolder>
+      <HostFolder>C:\Quarantine_Zone\RBI_WritableVolume\Telemetry</HostFolder>
       <SandboxFolder>C:\Telemetry</SandboxFolder>
       <ReadOnly>false</ReadOnly>
     </MappedFolder>
@@ -38,8 +38,13 @@
       <SandboxFolder>C:\FeatureSource</SandboxFolder>
       <ReadOnly>true</ReadOnly>
     </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\RBI_NetFx3Source</HostFolder>
+      <SandboxFolder>C:\NetFx3Source</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
   </MappedFolders>
   <LogonCommand>
-    <Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Sample\sandbox-runner.ps1</Command>
+    <Command>cmd.exe /d /c C:\Sample\sandbox-bootstrap.cmd</Command>
   </LogonCommand>
 </Configuration>
