@@ -1,4 +1,4 @@
-param ([switch]$AllowOnlineRuntimeInstall)
+﻿param ([switch]$AllowOnlineRuntimeInstall)
 
 $ErrorActionPreference = "Stop"
 $script:AllowOnlineRuntimeInstall = [bool]$AllowOnlineRuntimeInstall
@@ -1279,9 +1279,11 @@ function Get-BoundedGuestFiles {
                         if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
                             $entryParent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($entryPath)).TrimEnd('\')
                             $entryName = [IO.Path]::GetFileName([IO.Path]::GetFullPath($entryPath))
-                            $knownProfileAlias = ($entryParent -ieq $documentsRoot) -and ($entryName -in @("My Music", "My Pictures", "My Videos"))
+                            $linkTargetIsProfileAlias = $false
+try { $fsutilText = (& fsutil reparsepoint query $entryPath 2>$null) -join "`n"; if ($fsutilText -match ('(?m)' + [regex]::Escape($userProfile) + '\\(Music|Pictures|Videos)\s*$')) { $linkTargetIsProfileAlias = $true } } catch { }
+$knownProfileAlias = ($entryParent -ieq $documentsRoot) -and (($entryName -in @("My Music", "My Pictures", "My Videos")) -or $linkTargetIsProfileAlias)
                             if (-not $knownProfileAlias -and -not $truncatedReason) {
-                                $truncatedReason = "Guest file inventory encountered directory link '$entryPath' whose target was not followed."
+                                $truncatedReason = "Guest file inventory encountered directory link '$entryPath' -> target [$(@((Get-Item -LiteralPath $entryPath -Force -ErrorAction SilentlyContinue).Target) -join ' | ')] whose target was not followed."
                             }
                             continue
                         }
@@ -1294,7 +1296,7 @@ function Get-BoundedGuestFiles {
                         continue
                     }
                     if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                        if (-not $truncatedReason) { $truncatedReason = "Guest file inventory encountered file link '$entryPath' whose target was not followed." }
+                        if (-not $truncatedReason) { $truncatedReason = "Guest file inventory encountered file link '$entryPath' -> target [$(@((Get-Item -LiteralPath $entryPath -Force -ErrorAction SilentlyContinue).Target) -join ' | ')] whose target was not followed." }
                         continue
                     }
 

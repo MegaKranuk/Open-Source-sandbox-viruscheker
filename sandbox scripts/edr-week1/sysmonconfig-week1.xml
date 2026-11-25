@@ -1,0 +1,35 @@
+﻿<Sysmon schemaversion="4.91">
+  <HashAlgorithms>sha256</HashAlgorithms>
+  <CheckRevocation/>
+  <EventFiltering>
+    <RuleGroup name="ProcessCreate" groupRelation="or">
+      <ProcessCreate onmatch="exclude" />
+    </RuleGroup>
+    <RuleGroup name="NetworkConnect" groupRelation="or">
+      <NetworkConnect onmatch="exclude" />
+    </RuleGroup>
+    <RuleGroup name="CreateRemoteThread" groupRelation="or">
+      <CreateRemoteThread onmatch="exclude" />
+    </RuleGroup>
+    <RuleGroup name="ProcessAccess" groupRelation="or">
+      <ProcessAccess onmatch="include">
+        <TargetImage condition="end with">\lsass.exe</TargetImage>
+      </ProcessAccess>
+    </RuleGroup>
+    <RuleGroup name="RegistryEvent" groupRelation="or">
+      <RegistryEvent onmatch="include">
+        <TargetObject condition="contains">\CurrentVersion\Run</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\RunOnce</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\Winlogon</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\Image File Execution Options</TargetObject>
+        <TargetObject condition="contains">\Services\</TargetObject>
+      </RegistryEvent>
+    </RuleGroup>
+    <RuleGroup name="FileDeleteDetected" groupRelation="or">
+      <FileDeleteDetected onmatch="exclude" />
+    </RuleGroup>
+
+  </EventFiltering>
+</Sysmon>
+
+

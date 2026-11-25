@@ -1,0 +1,26 @@
+<AppLockerPolicy Version="1">
+  <RuleCollection Type="Exe" EnforcementMode="AuditOnly">
+    <FilePathRule Id="bc05b4ce-c528-486e-a147-ee1fcbb8fd3d" Name="Allow Windows" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions><FilePathCondition Path="%WINDIR%\*" /></Conditions>
+    </FilePathRule>
+    <FilePathRule Id="87f033cb-1ea6-486d-86c1-a156d5877b5a" Name="Allow Program Files" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions><FilePathCondition Path="%PROGRAMFILES%\*" /></Conditions>
+    </FilePathRule>
+  </RuleCollection>
+  <RuleCollection Type="Script" EnforcementMode="AuditOnly">
+    <FilePathRule Id="79c4dd8f-ea13-4cd1-b4f0-6c4212fa7b61" Name="Allow Windows scripts" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions><FilePathCondition Path="%WINDIR%\*" /></Conditions>
+    </FilePathRule>
+    <FilePathRule Id="c099ae90-251f-4b6e-b0eb-8d68914d64bd" Name="Allow Program Files scripts" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions><FilePathCondition Path="%PROGRAMFILES%\*" /></Conditions>
+    </FilePathRule>
+    <FilePathRule Id="af57a2d2-6817-4594-b897-bbfb43b7847e" Name="Allow RBI runner and EDR scripts" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions><FilePathCondition Path="C:\Sample\*" /></Conditions>
+    </FilePathRule>
+  </RuleCollection>
+  <RuleCollection Type="Msi" EnforcementMode="AuditOnly">
+    <FilePathRule Id="81ca7374-a63b-46ba-8639-74e3706b1a47" Name="Allow Windows Installer cache" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions><FilePathCondition Path="%WINDIR%\Installer\*" /></Conditions>
+    </FilePathRule>
+  </RuleCollection>
+</AppLockerPolicy>

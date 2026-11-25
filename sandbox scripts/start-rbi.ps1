@@ -1,3 +1,7 @@
+param(
+    [string]$DownloadsPath
+)
+
 try {
     $sig = '[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int nStdHandle); [DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr hConsoleHandle, out int lpMode); [DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr hConsoleHandle, int dwMode); [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern IntPtr GetSystemMenu(IntPtr hWnd, bool bRevert); [DllImport("user32.dll")] public static extern uint EnableMenuItem(IntPtr hMenu, uint uIDEnableItem, uint uEnable); [DllImport("user32.dll")] public static extern bool DrawMenuBar(IntPtr hWnd);'
     $type = Add-Type -MemberDefinition $sig -Name 'ConsoleUtils' -Namespace 'Win32' -PassThru -ErrorAction SilentlyContinue
@@ -21,11 +25,22 @@ try {
     }
 } catch {}
 
-$DownloadsFolder = "$env:USERPROFILE\Downloads"
-$SafeFilesFolder = "$env:USERPROFILE\Desktop\Safe_Files"
-$ReviewFilesFolder = "$env:USERPROFILE\Desktop\Review_Files"
-$FlaggedFilesFolder = Join-Path $ReviewFilesFolder "Flagged"
-$LegacyThreatFilesFolder = "$env:USERPROFILE\Desktop\Threat_Files"
+$DownloadsFolder = if ([string]::IsNullOrWhiteSpace($DownloadsPath)) {
+    Join-Path $env:USERPROFILE 'Downloads'
+} else {
+    $DownloadsPath.Trim()
+}
+try {
+    $DownloadsFolder = [IO.Path]::GetFullPath($DownloadsFolder)
+} catch {
+    Write-Host "[!] The configured Downloads path is invalid: $DownloadsFolder" -ForegroundColor Red
+    exit 1
+}
+if (-not (Test-Path -LiteralPath $DownloadsFolder -PathType Container)) {
+    Write-Host "[!] The configured Downloads folder does not exist or cannot be accessed: $DownloadsFolder" -ForegroundColor Red
+    exit 1
+}
+Write-Host "[*] Watching Downloads folder: $DownloadsFolder" -ForegroundColor DarkGray
 $pipelineMutex = $null
 $pipelineMutexOwned = $false
 try {
@@ -52,6 +67,12 @@ $QueueRecoveryFolder = Join-Path $QuarantineFolder "QueueRecovery"
 $WritableShareMountPath = Join-Path $QuarantineFolder "RBI_WritableVolume"
 $WritableShareVhdPath = Join-Path $QuarantineFolder "RBI_WritableVolume.vhdx"
 $WritableShareVolumeLimitMiB = 256
+$VirusTotalUploadEnabled = $true
+$SandboxAutoRunEnabled = $true
+$SandboxNetworkingEnabled = $false
+$SkipDynamicForKnownBad = $true
+$KnownBadHashFile = "C:\Quarantine_Zone\known-bad-hashes.csv"
+Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Filter "rbi-analysis-*.wsb" -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt (Get-Date).AddMinutes(-10) } | Remove-Item -Force -ErrorAction SilentlyContinue
 $MinimumHostFreeSpaceAfterShareBytes = 1GB
 $HoneypotFolder = Join-Path $WritableShareMountPath "Honeypot"
 $TelemetryFolder = Join-Path $WritableShareMountPath "Telemetry"
@@ -65,16 +86,30 @@ try {
     Write-Host "[!] Could not create the optional runtime source folders: $($_.Exception.Message)" -ForegroundColor Yellow
 }
 $WsbFile = Join-Path -Path $PSScriptRoot -ChildPath "sandbox.wsb"
+$EdrW1ToolsFolder = "C:\RBI_EdrTools"
+$EdrW1Enabled = $false
+try {
+    New-Item -ItemType Directory -Force -Path $EdrW1ToolsFolder | Out-Null
+    . (Join-Path $PSScriptRoot "edr-week1\EdrWeek1Report.ps1")
+    $EdrW1Enabled = $true
+    . (Join-Path $PSScriptRoot "edr-week1\RbiHashCache.ps1")
+    . (Join-Path $PSScriptRoot "edr-week1\RbiStaticAnalysis.ps1")
+    if (-not (Test-Path -LiteralPath (Join-Path $EdrW1ToolsFolder "Sysmon64.exe"))) {
+        Write-Host "[!] Week 1 EDR: Sysmon64.exe is not in $EdrW1ToolsFolder yet. Run edr-week1\Install-EdrWeek1Tools.ps1 first; until then the guest will run without Sysmon telemetry." -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host "[!] Week 1 EDR layer disabled: $($_.Exception.Message)" -ForegroundColor Yellow
+}
 $SandboxRunnerFile = Join-Path -Path $PSScriptRoot -ChildPath "sandbox-runner.ps1"
 $SandboxBootstrapFile = Join-Path -Path $PSScriptRoot -ChildPath "sandbox-bootstrap.cmd"
 $ReportFile = Join-Path -Path $PSScriptRoot -ChildPath "analysis_report.txt"
-$SandboxStartupTimeoutSeconds = 60
+$SandboxStartupTimeoutSeconds = 180
 $SandboxSessionStartupQueryTimeoutMilliseconds = 15000
 $SandboxRestartWindowGraceSeconds = 12
 $SandboxRestartDetectionGraceSeconds = 45
 $SandboxShutdownWaitSeconds = 30
 $RuntimeSetupTimeoutSeconds = 900
-$GuestObservationSeconds = 35
+$GuestObservationSeconds = 60
 $MaxAnalysisSeconds = 180
 $DemoLaunchSettleSeconds = 8
 $DemoVisibleSeconds = 35
@@ -85,10 +120,55 @@ $MaxHoneypotHashBytes = 134217728
 $MaxHoneypotHashFileBytes = 16777216
 $SandboxCliCommand = Get-Command -Name "wsb.exe" -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 $SandboxCliPath = if ($SandboxCliCommand) { $SandboxCliCommand.Source } else { $null }
+$script:SandboxInteractiveUser = $null
+$script:SandboxInteractiveUserProfile = $null
+$script:SandboxCliIsInteractiveUser = $false
+try {
+    $interactiveUserName = [string](Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).UserName
+    if (-not [string]::IsNullOrWhiteSpace($interactiveUserName)) {
+        $interactiveSid = [System.Security.Principal.NTAccount]::new($interactiveUserName).Translate([System.Security.Principal.SecurityIdentifier]).Value
+        $interactiveProfile = Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop |
+            Where-Object { $_.SID -eq $interactiveSid -and $_.Loaded } |
+            Select-Object -First 1
+        if ($interactiveProfile) {
+            $script:SandboxInteractiveUser = $interactiveUserName
+            $script:SandboxInteractiveUserProfile = [string]$interactiveProfile.LocalPath
+            $currentWindowsUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+            $script:SandboxCliIsInteractiveUser = [string]::Equals($currentWindowsUser, $script:SandboxInteractiveUser, [StringComparison]::OrdinalIgnoreCase)
+            $interactiveUserSandboxCliPath = Join-Path $script:SandboxInteractiveUserProfile 'AppData\Local\Microsoft\WindowsApps\wsb.exe'
+            if (Test-Path -LiteralPath $interactiveUserSandboxCliPath -PathType Leaf) {
+                $SandboxCliPath = $interactiveUserSandboxCliPath
+            }
+        }
+    }
+} catch {
+    $script:SandboxInteractiveUser = $null
+    $script:SandboxInteractiveUserProfile = $null
+    $script:SandboxCliIsInteractiveUser = $false
+}
+if ($SandboxCliPath) {
+    Write-Host "[*] Windows Sandbox CLI: $SandboxCliPath" -ForegroundColor DarkGray
+} else {
+    Write-Host "[!] Windows Sandbox CLI (wsb.exe) is unavailable for the launcher account or current process." -ForegroundColor Yellow
+}
+if ($script:SandboxInteractiveUser -and -not $script:SandboxCliIsInteractiveUser) {
+    Write-Host "[*] Elevated as a different account; Windows Sandbox will be activated in the logged-on session for $script:SandboxInteractiveUser." -ForegroundColor DarkGray
+}
+$ResultDesktopFolder = if ($script:SandboxInteractiveUserProfile) {
+    Join-Path $script:SandboxInteractiveUserProfile 'Desktop'
+} else {
+    Join-Path $env:USERPROFILE 'Desktop'
+}
+$SafeFilesFolder = Join-Path $ResultDesktopFolder 'Safe_Files'
+$ReviewFilesFolder = Join-Path $ResultDesktopFolder 'Review_Files'
+$FlaggedFilesFolder = Join-Path $ReviewFilesFolder 'Flagged'
+$LegacyThreatFilesFolder = Join-Path $ResultDesktopFolder 'Threat_Files'
+Write-Host "[*] Result folders: $SafeFilesFolder and $ReviewFilesFolder" -ForegroundColor DarkGray
 $script:SandboxSessionIdsCache = @()
 $script:SandboxSessionQueryUtc = [DateTime]::MinValue
 $script:SandboxSessionQueryValid = $false
 $script:SandboxSessionQueryError = "Sandbox session state has not been queried."
+$script:SandboxSessionEnumerationDisabled = $false
 $SkippedQueuePaths = @{}
 $DefenderDetectionLookbackHours = 24
 $DefenderPollIntervalSeconds = 15
@@ -124,7 +204,7 @@ $IncompleteDownloadExtensions = @('.crdownload', '.part', '.partial', '.download
 function Get-QueueFileKey {
     param ([System.IO.FileInfo]$File)
 
-    return "{0}|{1}|{2}" -f $File.FullName, $File.Length, $File.LastWriteTimeUtc.Ticks
+    return "{0}|{1}" -f $File.FullName, $File.CreationTimeUtc.Ticks
 }
 
 function Write-QueueEnumerationWarning {
@@ -316,6 +396,16 @@ function New-QueueRecoveryMarker {
     }
 }
 
+function Test-BrowserDownloadMark {
+    param($File)
+    try {
+        $mark = Get-Content -LiteralPath $File.FullName -Stream Zone.Identifier -ErrorAction Stop
+        return [bool]($mark | Where-Object { $_ -match '^ZoneId=' })
+    } catch {
+        return $false
+    }
+}
+
 function Get-StableQueueSample {
     foreach ($trackedPath in @($script:QueueDownloadActivity.Keys)) {
         $trackedState = $script:QueueDownloadActivity[$trackedPath]
@@ -384,6 +474,7 @@ function Get-StableQueueSample {
         if ($isPartialDownload) { continue }
         if ($downloadProgress -and $downloadProgress.QuietSeconds -lt $QueueMsiQuietSeconds) { continue }
 
+        if (-not (Test-BrowserDownloadMark -File $file)) { continue }
         $queueKey = Get-QueueFileKey -File $file
         if ($script:SkippedQueuePaths.ContainsKey($queueKey)) { continue }
         if (Test-QueueFileStable -File $file) {
@@ -502,9 +593,83 @@ function New-AnalysisSandboxConfig {
         $networkNode.InnerText = "Disable"
     }
 
+    Add-HashCacheMapping -Document $document
     $configPath = Join-Path ([IO.Path]::GetTempPath()) ("rbi-analysis-{0}.wsb" -f [Guid]::NewGuid().ToString("N"))
     $document.Save($configPath)
     return $configPath
+}
+
+function Start-InteractiveWindowsSandboxConfig {
+    param ([Parameter(Mandatory = $true)][string]$ConfigPath)
+
+    if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
+        throw "Windows Sandbox configuration was not found: $ConfigPath"
+    }
+    if (-not $script:SandboxInteractiveUser -or -not $script:SandboxInteractiveUserProfile) {
+        throw "Could not identify the logged-on desktop user needed to activate Windows Sandbox."
+    }
+    if ($script:SandboxCliIsInteractiveUser) {
+        Start-Process -FilePath $ConfigPath -ErrorAction Stop | Out-Null
+        return [pscustomobject]@{ ConfigPath = $null; TaskName = $null }
+    }
+
+    $explorerPath = Join-Path $env:SystemRoot 'explorer.exe'
+    if (-not (Test-Path -LiteralPath $explorerPath -PathType Leaf)) {
+        throw "Windows Explorer is unavailable at $explorerPath."
+    }
+    $interactiveTempRoot = Join-Path $script:SandboxInteractiveUserProfile 'AppData\Local\Temp'
+    if (-not (Test-Path -LiteralPath $interactiveTempRoot -PathType Container)) {
+        throw "The logged-on user's temporary folder is missing: $interactiveTempRoot"
+    }
+
+    $launchFolder = Join-Path $interactiveTempRoot ("RBI-SandboxLaunch-{0}" -f [Guid]::NewGuid().ToString('N'))
+    $userConfigPath = Join-Path $launchFolder 'analysis.wsb'
+    $taskName = "RBI-SandboxLaunch-{0}" -f [Guid]::NewGuid().ToString('N')
+    $taskRegistered = $false
+    try {
+        New-Item -ItemType Directory -Path $launchFolder -Force -ErrorAction Stop | Out-Null
+        Copy-Item -LiteralPath $ConfigPath -Destination $userConfigPath -Force -ErrorAction Stop
+
+        Import-Module ScheduledTasks -ErrorAction Stop
+        $action = New-ScheduledTaskAction -Execute $explorerPath -Argument ('"{0}"' -f $userConfigPath)
+        $principal = New-ScheduledTaskPrincipal -UserId $script:SandboxInteractiveUser -LogonType Interactive -RunLevel Limited
+        $task = New-ScheduledTask -Action $action -Principal $principal
+        Register-ScheduledTask -TaskName $taskName -InputObject $task -Force -ErrorAction Stop | Out-Null
+        $taskRegistered = $true
+        Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+
+        $taskReady = $false
+        $taskWaitDeadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            $taskState = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+            if (-not $taskState -or $taskState.State -ne 'Running') {
+                $taskReady = $true
+                break
+            }
+            Start-Sleep -Milliseconds 250
+        } while ([DateTime]::UtcNow -lt $taskWaitDeadline)
+
+        if ($taskReady) {
+            $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
+            if ($taskInfo -and [uint32]$taskInfo.LastTaskResult -ne 0) {
+                $launchTaskResult = [uint32]$taskInfo.LastTaskResult
+                Write-Host "[!] Explorer launch task returned code $launchTaskResult; keeping the .wsb file while Windows Sandbox activation completes." -ForegroundColor Yellow
+                Add-Content -Path $ReportFile -Value "[SANDBOX] Explorer launch task returned code $launchTaskResult. The .wsb file was retained because Windows Sandbox activation can continue after Explorer exits." -ErrorAction SilentlyContinue
+            }
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+            $taskName = $null
+        }
+
+        return [pscustomobject]@{ ConfigPath = $userConfigPath; TaskName = $taskName }
+    } catch {
+        if ($taskRegistered) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $launchFolder) {
+            Remove-Item -LiteralPath $launchFolder -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        throw "Could not activate Windows Sandbox in $script:SandboxInteractiveUser's desktop session: $($_.Exception.Message)"
+    }
 }
 
 function Move-FileToUniqueDestination {
@@ -565,6 +730,7 @@ function Invoke-DiskPartScript {
     try {
         [IO.File]::WriteAllLines($scriptPath, $Commands, [Text.Encoding]::ASCII)
         $process = Start-Process -FilePath $diskPartPath -ArgumentList "/s `"$scriptPath`"" -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -ErrorAction Stop
+        $null = $process.Handle
         if (-not $process.WaitForExit(120000)) {
             try { $process.Kill() } catch {}
             if (-not $process.WaitForExit(5000)) { throw "DiskPart did not exit after its 120-second timeout." }
@@ -733,6 +899,9 @@ function Invoke-StaticAnalysis {
     }
 
     Add-Content -Path $ReportFile -Value ($reportLines -join [Environment]::NewLine)
+    if (Get-Command Get-RbiStaticLines -ErrorAction SilentlyContinue) {
+        try { Add-Content -Path $ReportFile -Value ((Get-RbiStaticLines -FilePath $FilePath) -join [Environment]::NewLine) } catch { Add-Content -Path $ReportFile -Value "[STATIC] Static module failed: $($_.Exception.Message)" }
+    }
 }
 
 function Invoke-VirusTotalRequest {
@@ -934,7 +1103,10 @@ function Get-VirusTotalReport {
                 $result.Error = "VirusTotal file lookup failed: $($lookup.Error)."
             }
 
-            if ($shouldUpload) {
+            if ($shouldUpload -and -not $VirusTotalUploadEnabled) {
+                $result.Status = "upload-disabled"
+                $result.Error = "No fresh VirusTotal report exists for this hash. Upload is disabled by policy (`$VirusTotalUploadEnabled = `$false), so the file was not sent."
+            } elseif ($shouldUpload) {
                 $fileInfo = Get-Item -LiteralPath $FilePath -ErrorAction Stop
                 $maxUploadBytes = 650MB
                 if ($fileInfo.Length -gt $maxUploadBytes) {
@@ -1592,7 +1764,15 @@ function Test-GuestRunnerRestart {
 
 function Get-WindowsSandboxProcesses {
     $processes = @()
-    foreach ($processName in @("WindowsSandboxClient", "WindowsSandboxRemoteSession")) {
+    foreach ($processName in @("WindowsSandbox", "WindowsSandboxClient", "WindowsSandboxRemoteSession")) {
+        $processes += @(Get-Process -Name $processName -ErrorAction SilentlyContinue)
+    }
+    return @($processes | Sort-Object -Property Id -Unique)
+}
+
+function Get-WindowsSandboxSessionProcesses {
+    $processes = @()
+    foreach ($processName in @("WindowsSandbox", "WindowsSandboxClient", "WindowsSandboxRemoteSession", "WindowsSandboxServer")) {
         $processes += @(Get-Process -Name $processName -ErrorAction SilentlyContinue)
     }
     return @($processes | Sort-Object -Property Id -Unique)
@@ -1636,6 +1816,16 @@ function Get-WindowsSandboxSessionIds {
         [int]$TimeoutMilliseconds = 5000
     )
 
+    if ($script:SandboxSessionEnumerationDisabled) {
+        $script:SandboxSessionQueryValid = $false
+        return @()
+    }
+    if ($script:SandboxInteractiveUser -and -not $script:SandboxCliIsInteractiveUser) {
+        $script:SandboxSessionQueryValid = $false
+        $script:SandboxSessionQueryError = "wsb.exe session queries are skipped because the elevated process runs as a different user; Windows Sandbox is activated in $script:SandboxInteractiveUser's desktop session, so process checks are used."
+        $script:SandboxSessionEnumerationDisabled = $true
+        return @()
+    }
     if (-not $SandboxCliPath) {
         $script:SandboxSessionQueryValid = $false
         $script:SandboxSessionQueryError = "wsb.exe is unavailable; Sandbox sessions cannot be enumerated."
@@ -1666,10 +1856,11 @@ function Get-WindowsSandboxSessionIds {
         $stderrTask = $listProcess.StandardError.ReadToEndAsync()
         $queryStage = "waiting for wsb.exe"
         if (-not $listProcess.WaitForExit($TimeoutMilliseconds)) {
-            try { $listProcess.Kill(); $listProcess.WaitForExit() } catch {}
+            try { $listProcess.Kill(); [void]$listProcess.WaitForExit(2000) } catch {}
             $script:SandboxSessionQueryValid = $false
             $script:SandboxSessionQueryError = "wsb.exe list --raw timed out after $([Math]::Ceiling($TimeoutMilliseconds / 1000.0)) seconds."
             $script:SandboxSessionQueryUtc = [DateTime]::UtcNow
+            $script:SandboxSessionEnumerationDisabled = $true
             return @()
         }
         $listProcess.WaitForExit()
@@ -1678,6 +1869,7 @@ function Get-WindowsSandboxSessionIds {
         $stderrText = if ($stderrTask) { [string]$stderrTask.GetAwaiter().GetResult() } else { "" }
         if ([string]::IsNullOrWhiteSpace($rawText)) {
             $script:SandboxSessionQueryValid = $false
+            $script:SandboxSessionEnumerationDisabled = $true
             $stderrText = $stderrText.Trim()
             if ($stderrText.Length -gt 300) { $stderrText = $stderrText.Substring(0, 300) }
             $script:SandboxSessionQueryError = if ($stderrText) { "wsb.exe list --raw returned no session data: $stderrText" } else { "wsb.exe list --raw returned no session data." }
@@ -1686,6 +1878,7 @@ function Get-WindowsSandboxSessionIds {
         }
         if ($listProcess.ExitCode -ne 0) {
             $script:SandboxSessionQueryValid = $false
+            $script:SandboxSessionEnumerationDisabled = $true
             $stderrText = $stderrText.Trim()
             if ($stderrText.Length -gt 300) { $stderrText = $stderrText.Substring(0, 300) }
             $script:SandboxSessionQueryError = if ($stderrText) { "wsb.exe list --raw returned exit code $($listProcess.ExitCode): $stderrText" } else { "wsb.exe list --raw returned exit code $($listProcess.ExitCode)." }
@@ -1711,6 +1904,7 @@ function Get-WindowsSandboxSessionIds {
         return @($activeIds)
     } catch {
         $script:SandboxSessionQueryValid = $false
+        $script:SandboxSessionEnumerationDisabled = $true
         $script:SandboxSessionQueryError = "Could not parse the wsb.exe session list during ${queryStage}: $($_.Exception.Message)"
         $script:SandboxSessionQueryUtc = [DateTime]::UtcNow
         return @()
@@ -1723,15 +1917,89 @@ function Test-WindowsSandboxSessionRunning {
     param ([string]$SessionId)
 
     $sessionIds = @(Get-WindowsSandboxSessionIds)
-    if (-not $script:SandboxSessionQueryValid) { return $true }
+    if (-not $script:SandboxSessionQueryValid) {
+        return (@(Get-WindowsSandboxSessionProcesses).Count -gt 0)
+    }
     if ($SessionId) { return ($SessionId -in $sessionIds) }
     return ($sessionIds.Count -gt 0)
+}
+
+function Stop-WindowsSandboxProcesses {
+    param (
+        [string[]]$SessionIds = @(),
+        [string]$Purpose = "existing Sandbox session"
+    )
+
+    $initialProcesses = @(Get-WindowsSandboxSessionProcesses)
+
+    if ($script:SandboxCliIsInteractiveUser -and $SandboxCliPath -and $SessionIds.Count -gt 0) {
+        foreach ($sessionId in $SessionIds) {
+            $stopProcess = $null
+            try {
+                $stopProcess = Start-Process -FilePath $SandboxCliPath -ArgumentList @("stop", "--id", $sessionId) -PassThru -WindowStyle Hidden -ErrorAction Stop
+                if (-not $stopProcess.WaitForExit(10000)) {
+                    try { $stopProcess.Kill(); [void]$stopProcess.WaitForExit(2000) } catch {}
+                    Write-Host "[!] wsb.exe stop timed out for session $sessionId; will close its remaining processes." -ForegroundColor Yellow
+                } elseif ($stopProcess.ExitCode -ne 0) {
+                    Write-Host "[!] wsb.exe stop returned exit code $($stopProcess.ExitCode) for session $sessionId; will close its remaining processes." -ForegroundColor Yellow
+                }
+            } catch {
+                Write-Host "[!] Could not stop Sandbox session $sessionId through wsb.exe; will close its remaining processes." -ForegroundColor Yellow
+            } finally {
+                if ($stopProcess) { $stopProcess.Dispose() }
+            }
+        }
+    }
+
+    if ($initialProcesses.Count -eq 0 -and $SessionIds.Count -eq 0) { return $true }
+    Write-Host "[!] Closing an existing Windows Sandbox instance ($Purpose). The guest session and its unsaved contents will be discarded." -ForegroundColor Yellow
+
+    foreach ($process in $initialProcesses) {
+        try {
+            if ($process.MainWindowHandle -ne [IntPtr]::Zero) { [void]$process.CloseMainWindow() }
+        } catch {}
+    }
+
+    $initialProcessIds = @($initialProcesses | Select-Object -ExpandProperty Id -Unique)
+    $graceDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+        $remainingInitial = @(Get-WindowsSandboxSessionProcesses | Where-Object { $_.Id -in $initialProcessIds })
+        if ($remainingInitial.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $graceDeadline)
+
+    $remainingProcesses = @(Get-WindowsSandboxSessionProcesses)
+    foreach ($process in $remainingProcesses) {
+        try {
+            Stop-Process -Id $process.Id -Force -ErrorAction Stop
+            Write-Host "[*] Stopped Windows Sandbox process $($process.ProcessName) (PID $($process.Id))." -ForegroundColor DarkGray
+        } catch {}
+    }
+
+    $stopDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        $remainingProcesses = @(Get-WindowsSandboxSessionProcesses)
+        if ($remainingProcesses.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTime]::UtcNow -lt $stopDeadline)
+
+    if ($remainingProcesses.Count -gt 0) { return $false }
+    if ($SessionIds.Count -gt 0 -and (-not $script:SandboxCliIsInteractiveUser -or -not $SandboxCliPath)) {
+        return $false
+    }
+    if ($script:SandboxSessionQueryValid -or $SessionIds.Count -gt 0) {
+        $remainingSessions = @(Get-WindowsSandboxSessionIds -ForceRefresh -TimeoutMilliseconds 5000)
+        if ($SessionIds.Count -gt 0 -and -not $script:SandboxSessionQueryValid) { return $false }
+        if ($script:SandboxSessionQueryValid -and $remainingSessions.Count -gt 0) { return $false }
+    }
+    return $true
 }
 
 function Stop-AnalysisSandbox {
     param ([string]$SessionId, [int[]]$ClientProcessIds)
 
     $stoppedByCli = $false
+    $stoppedByProcesses = $false
     if ($SessionId -and $SandboxCliPath) {
         $stopStdoutPath = Join-Path ([IO.Path]::GetTempPath()) ("sandbox-stop-{0}.out" -f [Guid]::NewGuid().ToString("N"))
         $stopStderrPath = Join-Path ([IO.Path]::GetTempPath()) ("sandbox-stop-{0}.err" -f [Guid]::NewGuid().ToString("N"))
@@ -1756,12 +2024,10 @@ function Stop-AnalysisSandbox {
     }
 
     if (-not $stoppedByCli) {
-        foreach ($processId in $ClientProcessIds) {
-            Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
-        }
+        $stoppedByProcesses = Stop-WindowsSandboxProcesses -SessionIds @($SessionId | Where-Object { $_ }) -Purpose "analysis cleanup"
     }
     if (-not $ClientProcessIds) { $ClientProcessIds = @() }
-    if ((-not $SessionId -or -not $SandboxCliPath) -and $ClientProcessIds.Count -eq 0) { return $false }
+    if ((-not $SessionId -or -not $SandboxCliPath) -and $ClientProcessIds.Count -eq 0) { return [bool]$stoppedByProcesses }
 
     $deadline = (Get-Date).AddSeconds(20)
     do {
@@ -1769,15 +2035,16 @@ function Stop-AnalysisSandbox {
         $processStillRunning = @($ClientProcessIds | Where-Object { $_ -in $activeIds }).Count -gt 0
         $sessionStillRunning = Test-WindowsSandboxSessionRunning -SessionId $SessionId
         if (-not $sessionStillRunning -and $processStillRunning) {
-            foreach ($processId in $ClientProcessIds) {
-                Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
-            }
+            foreach ($processId in $ClientProcessIds) { Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue }
         }
         if (-not $processStillRunning -and -not $sessionStillRunning) { return $true }
         Start-Sleep -Seconds 1
     } while ((Get-Date) -lt $deadline)
 
-    return $false
+    if (-not $stoppedByProcesses) {
+        $stoppedByProcesses = Stop-WindowsSandboxProcesses -SessionIds @($SessionId | Where-Object { $_ }) -Purpose "analysis cleanup timeout"
+    }
+    return [bool]$stoppedByProcesses
 }
 
 while ($true) {
@@ -1813,11 +2080,14 @@ while ($true) {
     $startedSandbox = $false
     $sandboxStopped = $false
     $analysisWsbFile = $null
+    $interactiveSandboxConfigPath = $null
+    $interactiveSandboxTaskName = $null
     $StagingFolder = Join-Path $StagingParentFolder ("Staging-{0}" -f [Guid]::NewGuid().ToString("N"))
     $PayloadFolder = Join-Path $StagingFolder "payload"
     $allowSandboxNetworking = $false
     $sandboxSkippedReason = $null
     $stagedSamplePrepared = $false
+    $stagedSha256 = $null
     $demoSeconds = 0
     $demonstrationElapsedSeconds = 0
     $sandboxRebootCount = 0
@@ -1906,7 +2176,7 @@ while ($true) {
                     $virusTotalSuspicious = [int]$virusTotalResult.Suspicious
                 }
             }
-            $allowSandboxNetworking = [bool]($virusTotalComplete -and
+            $allowSandboxNetworking = [bool]($SandboxNetworkingEnabled -and $virusTotalComplete -and
                 ($null -ne $virusTotalMalicious) -and ($virusTotalMalicious -eq 0) -and
                 ($null -ne $virusTotalSuspicious) -and ($virusTotalSuspicious -eq 0))
 
@@ -1943,16 +2213,37 @@ while ($true) {
                 Add-Content -Path $ReportFile -Value "[SANDBOX] Dynamic analysis skipped: $sandboxSkippedReason"
             }
 
-            $existingSandbox = @(Get-WindowsSandboxProcesses)
+            if ($SkipDynamicForKnownBad -and $virusTotalComplete -and ([int]$virusTotalMalicious -gt 0) -and -not $sandboxSkippedReason) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $KnownBadHashFile) | Out-Null
+    Add-Content -LiteralPath $KnownBadHashFile -Value ("{0},{1},{2},{3}" -f (Get-Date -Format "o"), [string]$virusTotalResult.Sha256, $originalName, $virusTotalMalicious) -ErrorAction SilentlyContinue
+    $sandboxSkippedReason = "VirusTotal marks this hash as malicious; the sample was not executed. The hash was recorded in known-bad-hashes.csv."
+    $runStatus = "VIRUS"
+    $runReason = $sandboxSkippedReason
+    Add-Content -Path $ReportFile -Value "[SANDBOX] $sandboxSkippedReason"
+}
+if (-not $SandboxAutoRunEnabled -and -not $sandboxSkippedReason) {
+                $sandboxSkippedReason = 'Automatic Windows Sandbox execution is disabled by policy ($SandboxAutoRunEnabled = $false). The sample was not copied or launched.'
+                $runStatus = 'INCONCLUSIVE'
+                $runReason = $sandboxSkippedReason
+                Add-Content -Path $ReportFile -Value "[SANDBOX] $sandboxSkippedReason"
+            }
+
+            $existingSandbox = @(Get-WindowsSandboxSessionProcesses)
             $existingSandboxSessionIds = @(Get-WindowsSandboxSessionIds -TimeoutMilliseconds $SandboxSessionStartupQueryTimeoutMilliseconds)
             if ($sandboxSkippedReason) {
-            } elseif (-not $script:SandboxSessionQueryValid) {
-                $runStatus = "INCONCLUSIVE"
-                $runReason = "Could not reliably enumerate Windows Sandbox sessions ($script:SandboxSessionQueryError). The sample was not launched to avoid reusing or overlooking an active session."
-                Add-Content -Path $ReportFile -Value "[SANDBOX] Session enumeration failed; skipped launch and preserved the sample for review. Detail: $script:SandboxSessionQueryError"
-            } elseif ($existingSandbox.Count -gt 0 -or $existingSandboxSessionIds.Count -gt 0) {
-                $runReason = "An existing Windows Sandbox session is open; this sample was not run."
+            } elseif (($existingSandbox.Count -gt 0 -or ($script:SandboxSessionQueryValid -and $existingSandboxSessionIds.Count -gt 0)) -and
+                -not (Stop-WindowsSandboxProcesses -SessionIds $existingSandboxSessionIds -Purpose "before the next sample")) {
+                $runReason = "An existing Windows Sandbox process or session could not be stopped; this sample was not run."
             } else {
+                if ($existingSandbox.Count -gt 0 -or ($script:SandboxSessionQueryValid -and $existingSandboxSessionIds.Count -gt 0)) {
+                    $existingSandbox = @(Get-WindowsSandboxSessionProcesses)
+                    Add-Content -Path $ReportFile -Value "[SANDBOX] A previous Windows Sandbox instance was closed before this analysis; its guest state was discarded."
+                    Write-Host "[*] Previous Windows Sandbox instance closed. Continuing with this sample." -ForegroundColor DarkGray
+                }
+                if (-not $script:SandboxSessionQueryValid) {
+                    Add-Content -Path $ReportFile -Value "[SANDBOX] $script:SandboxSessionQueryError Process-based fallback is active: launch continues only because no Windows Sandbox process was detected; lifecycle checks will use those processes."
+                    Write-Host "[!] wsb.exe session listing is unavailable; using Windows Sandbox process checks." -ForegroundColor Yellow
+                }
                 try {
                     $shareVolumeReady = $false
                     $shareVolumeErrors = @()
@@ -1981,6 +2272,7 @@ while ($true) {
                     New-Item -ItemType Directory -Force -Path $foldersToCreate | Out-Null
                     Copy-Item -LiteralPath $SandboxRunnerFile -Destination (Join-Path $StagingFolder "sandbox-runner.ps1") -Force -ErrorAction Stop
                     Copy-Item -LiteralPath $SandboxBootstrapFile -Destination (Join-Path $StagingFolder "sandbox-bootstrap.cmd") -Force -ErrorAction Stop
+                    if ($EdrW1Enabled) { Copy-EdrWeek1ToStaging -StagingFolder $StagingFolder }
                     $stagedSamplePath = Join-Path $PayloadFolder $originalName
                     Copy-Item -LiteralPath $sourcePath -Destination $stagedSamplePath -Force -ErrorAction Stop
                     $stagedSamplePrepared = $true
@@ -2013,14 +2305,19 @@ while ($true) {
                         Add-Content -Path $ReportFile -Value "[SANDBOX] Networking enabled because the completed VirusTotal report has zero malicious and suspicious detections (classification coverage: $($virusTotalResult.CoveragePercent)%). Incomplete coverage and zero detections are not guarantees of safety or containment."
                         Write-Host "[*] Sandbox networking enabled: VirusTotal completed with zero malicious/suspicious detections ($($virusTotalResult.CoveragePercent)% coverage)." -ForegroundColor Yellow
                     } else {
-                        $networkBlockReason = if ($virusTotalComplete -and (($virusTotalMalicious -gt 0) -or ($virusTotalSuspicious -gt 0))) { "VirusTotal reported malicious or suspicious detections" } else { "VirusTotal did not provide a completed report with zero malicious and suspicious detections" }
+                        $networkBlockReason = if (-not $SandboxNetworkingEnabled) { "network access is disabled by policy (`$SandboxNetworkingEnabled = `$false)" } elseif ($virusTotalComplete -and (($virusTotalMalicious -gt 0) -or ($virusTotalSuspicious -gt 0))) { "VirusTotal reported malicious or suspicious detections" } else { "VirusTotal did not provide a completed report with zero malicious and suspicious detections" }
                         Add-Content -Path $ReportFile -Value "[SANDBOX] Networking disabled because $networkBlockReason. This blocks guest Internet access for command-and-control, worm communication, and online installers; it does not guarantee containment."
                         Write-Host "[*] Sandbox networking disabled: $networkBlockReason." -ForegroundColor Yellow
                     }
                     Write-Host "[*] Starting Windows Sandbox and auto-running the sample..." -ForegroundColor Cyan
                     try {
+                        if (@(Get-WindowsSandboxSessionProcesses).Count -gt 0) {
+                            throw "A Windows Sandbox process appeared during preparation; refusing to start another session."
+                        }
                         $analysisWsbFile = New-AnalysisSandboxConfig -EnableNetworking $allowSandboxNetworking -HostStagingFolder $StagingFolder
-                        Start-Process -FilePath $analysisWsbFile -ErrorAction Stop | Out-Null
+                        $sandboxLaunch = Start-InteractiveWindowsSandboxConfig -ConfigPath $analysisWsbFile
+                        $interactiveSandboxConfigPath = [string]$sandboxLaunch.ConfigPath
+                        $interactiveSandboxTaskName = [string]$sandboxLaunch.TaskName
                         $startedSandbox = $true
                     } catch {
                         $runReason = "Windows Sandbox could not be launched: $($_.Exception.Message)"
@@ -2471,6 +2768,18 @@ while ($true) {
         Add-Content -Path $ReportFile -Value "[ANALYSIS] $runReason"
     }
 
+    if ($startedSandbox -and $EdrW1Enabled) {
+        $edrW1ExportConfirmed = Wait-EdrWeek1Export -TelemetryDir $TelemetryFolder -TimeoutSeconds 120
+        if (-not $edrW1ExportConfirmed) {
+            Write-Host "[!] Week 1 EDR: the guest did not confirm its telemetry export within 25 seconds." -ForegroundColor Yellow
+        }
+        try {
+            Write-EdrWeek1ReportLines -TelemetryDir $TelemetryFolder -ReportFile $ReportFile -ExportConfirmed ([bool]$edrW1ExportConfirmed)
+        } catch {
+            Add-Content -Path $ReportFile -Value "[EDR WEEK1] Reading the Week 1 telemetry failed: $($_.Exception.Message)"
+        }
+    }
+
     if ($startedSandbox -and $script:HoneypotWatcher) {
         $finalHoneypotSignal = Get-HoneypotSignal -Baseline $baseline
         if ($finalHoneypotSignal) {
@@ -2886,6 +3195,20 @@ while ($true) {
     if ($analysisWsbFile -and (Test-Path -LiteralPath $analysisWsbFile)) {
         Remove-Item -LiteralPath $analysisWsbFile -Force -ErrorAction SilentlyContinue
     }
+    if ($interactiveSandboxTaskName) {
+        try {
+            $launchTaskState = Get-ScheduledTask -TaskName $interactiveSandboxTaskName -ErrorAction SilentlyContinue
+            if ($launchTaskState -and $launchTaskState.State -ne 'Running') {
+                Unregister-ScheduledTask -TaskName $interactiveSandboxTaskName -Confirm:$false -ErrorAction SilentlyContinue
+            }
+        } catch {}
+    }
+    if ($interactiveSandboxConfigPath -and ((-not $startedSandbox) -or $sandboxStopped)) {
+        $interactiveLaunchFolder = Split-Path -Parent $interactiveSandboxConfigPath
+        if (Test-Path -LiteralPath $interactiveLaunchFolder -PathType Container) {
+            Remove-Item -LiteralPath $interactiveLaunchFolder -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
     $stagedSamplePath = Join-Path $PayloadFolder $originalName
     if ($stagedSamplePrepared -and $runStatus -notin @("SUSPICIOUS", "VIRUS") -and (Test-Path -LiteralPath $stagedSamplePath)) {
         try {
@@ -2896,6 +3219,7 @@ while ($true) {
         }
     }
 
+    Write-HashCacheVerdict -Sha256 $stagedSha256 -RunStatus $runStatus -ReportFile $ReportFile
     $verdictText = "[VERDICT] " + $runStatus + [Environment]::NewLine + "[DETAIL] " + $runReason
     Add-Content -Path $ReportFile -Value $verdictText
 

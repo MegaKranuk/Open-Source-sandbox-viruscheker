@@ -39,6 +39,11 @@
       <ReadOnly>true</ReadOnly>
     </MappedFolder>
     <MappedFolder>
+      <HostFolder>C:\RBI_EdrTools</HostFolder>
+      <SandboxFolder>C:\EdrTools</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
       <HostFolder>C:\RBI_NetFx3Source</HostFolder>
       <SandboxFolder>C:\NetFx3Source</SandboxFolder>
       <ReadOnly>true</ReadOnly>
